@@ -57,9 +57,8 @@ import soot.jimple.Ref;
 /**
  * {@link SceneTransformer} that renames class names as well as packages.
  *
- * @author Michael Batchelder
- *         <p>
- *         Created on 26-Jan-2006
+ * @author Michael Batchelder, Pavel Nesterovich
+ * @since 26-Jan-2006
  */
 public class ClassRenamer extends SceneTransformer implements IJbcoTransform {
 
@@ -69,7 +68,6 @@ public class ClassRenamer extends SceneTransformer implements IJbcoTransform {
   private boolean renamePackages = false;
 
   public static final String name = "wjtp.jbco_cr";
-  private static final String dependencies[] = new String[] { ClassRenamer.name };
 
   private final Map<String, String> oldToNewPackageNames = new HashMap<>();
   private final Map<String, String> oldToNewClassNames = new HashMap<>();
@@ -112,11 +110,14 @@ public class ClassRenamer extends SceneTransformer implements IJbcoTransform {
 
   @Override
   public String[] getDependencies() {
-    return dependencies;
+    return new String[] { ClassRenamer.name };
   }
 
   @Override
   public void outputSummary() {
+    final StringBuilder stringBuilder = new StringBuilder("ClassName mapping:");
+    oldToNewClassNames.forEach((oldName, newName) -> stringBuilder.append(oldName).append(" -> ").append(newName));
+    logger.info(stringBuilder.toString());
   }
 
   /**
@@ -158,29 +159,6 @@ public class ClassRenamer extends SceneTransformer implements IJbcoTransform {
   }
 
   /**
-   * Adds mapping for class name.
-   *
-   * @param classNameSource
-   *          the class name to rename
-   * @param classNameTarget
-   *          the new class name
-   */
-  public void addClassNameMapping(String classNameSource, String classNameTarget) {
-    synchronized (classNamesMapLock) {
-      if (!oldToNewClassNames.containsKey(classNameSource) && !oldToNewClassNames.containsValue(classNameTarget)
-          && !BodyBuilder.nameList.contains(classNameTarget)) {
-
-        oldToNewClassNames.put(classNameSource, classNameTarget);
-        BodyBuilder.nameList.add(classNameTarget);
-
-        return;
-      }
-    }
-
-    throw new IllegalStateException("Cannot generate unique name: too long for JVM.");
-  }
-
-  /**
    * Gets mapping by predicate.
    *
    * @param predicate
@@ -206,33 +184,32 @@ public class ClassRenamer extends SceneTransformer implements IJbcoTransform {
 
     final SootClass mainClass = getMainClassSafely();
 
-    // iterate through application classes, rename classes with junk
-    for (SootClass sootClass : Scene.v().getApplicationClasses()) {
+    for (SootClass applicationClass : Scene.v().getApplicationClasses()) {
 
-      final String className = sootClass.getName();
+      final String className = applicationClass.getName();
 
-      if (sootClass.equals(mainClass) || oldToNewClassNames.containsValue(className)
+      if (applicationClass.equals(mainClass) || oldToNewClassNames.containsValue(className)
           || soot.jbco.Main.getWeight(phaseName, className) == 0) {
         continue;
       }
 
       String newClassName = oldToNewClassNames.get(className);
       if (newClassName == null) {
-        newClassName = getNewName(getPackageName(className), className);
+        newClassName = getOrAddNewName(getPackageName(className), className);
       }
 
-      sootClass.setName(newClassName);
+      applicationClass.setName(newClassName);
       RefType crt = RefType.v(newClassName);
-      crt.setSootClass(sootClass);
-      sootClass.setRefType(crt);
-      sootClass.setResolvingLevel(SootClass.BODIES);
+      crt.setSootClass(applicationClass);
+      applicationClass.setRefType(crt);
+      applicationClass.setResolvingLevel(SootClass.BODIES);
       // will this fix dangling classes?
-      // scene.addRefType(sootClass.getType());
+      // Scene.v().addRefType(applicationClass.getType());
 
-      newNameToClass.put(newClassName, sootClass);
+      newNameToClass.put(newClassName, applicationClass);
 
       if (isVerbose()) {
-        logger.info("\tRenaming " + className + " to " + newClassName);
+        logger.info("Renaming " + className + " to " + newClassName);
       }
     }
 
@@ -240,7 +217,7 @@ public class ClassRenamer extends SceneTransformer implements IJbcoTransform {
     Scene.v().setFastHierarchy(new FastHierarchy());
 
     if (isVerbose()) {
-      logger.info("\r\tUpdating bytecode class references");
+      logger.info("Updating bytecode class references");
     }
 
     for (SootClass sootClass : Scene.v().getApplicationClasses()) {
@@ -250,7 +227,7 @@ public class ClassRenamer extends SceneTransformer implements IJbcoTransform {
         }
 
         if (isVerbose()) {
-          logger.info("\t\t" + sootMethod.getSignature());
+          logger.info(sootMethod.getSignature());
         }
         Body aBody;
         try {
@@ -307,7 +284,8 @@ public class ClassRenamer extends SceneTransformer implements IJbcoTransform {
   }
 
   /**
-   * Generates new <strong>unique</strong> name that have not existed before and mapping for it.
+   * Generates new <strong>unique</strong> name that have not existed before and mapping for it or gets already generated
+   * name if one was generated before.
    *
    * @param packageName
    *          the package where class is located. Can be {@code null}
@@ -315,32 +293,60 @@ public class ClassRenamer extends SceneTransformer implements IJbcoTransform {
    *          the class name (without package) to create mapping for. Can be {@code null}
    * @return the new <strong>unique</strong> name
    */
-  public String getNewName(final String packageName, final String className) {
+  public String getOrAddNewName(final String packageName, final String className) {
     int size = 5;
     int tries = 0;
 
-    while (true) {
-      final String junkName = nameGenerator.generateName(size);
-      final String newClassName
-          = removePackages ? junkName : (renamePackages ? getNewPackageName(packageName) : packageName) + junkName;
+    String newFqn = "";
 
-      synchronized (classNamesMapLock) {
-        if (!oldToNewClassNames.containsKey(newClassName) && !oldToNewClassNames.containsValue(newClassName)
-            && !BodyBuilder.nameList.contains(newClassName)) {
+    // if className == null we must generate new name
+    // so check for already existing mapping is not applicable
+    if (className != null) {
+      newFqn = removePackages ? className : packageName == null ? className : packageName + '.' + className;
+      if (oldToNewClassNames.containsKey(newFqn)) {
+        return oldToNewClassNames.get(newFqn);
+      }
+    }
 
-          final String classNameSource = className == null || className.isEmpty() ? newClassName : className;
+    synchronized (classNamesMapLock) {
+      if (oldToNewClassNames.containsKey(newFqn)) {
+        return oldToNewClassNames.get(newFqn);
+      }
 
-          addClassNameMapping(classNameSource, newClassName);
+      while (newFqn.length() < NameGenerator.NAME_MAX_LENGTH) {
+        final String name = nameGenerator.generateName(size);
+        newFqn = name; // when removePackages is true
+        if (!removePackages) {
+          final String newPackage = renamePackages ? getOrAddNewPackageName(packageName) : packageName;
+          newFqn = newPackage == null ? name : newPackage + '.' + name;
+        }
 
-          return newClassName;
+        if (!oldToNewClassNames.containsValue(newFqn) && !BodyBuilder.nameList.contains(newFqn)) {
+
+          BodyBuilder.nameList.add(newFqn);
+
+          final String oldFqn;
+          if (className == null) {
+            // there were no old name, so create dumb mapping: newFqn -> newFqn
+            oldFqn = newFqn;
+          } else {
+            oldFqn = (packageName == null ? "" : packageName + '.') + className;
+          }
+
+          oldToNewClassNames.put(oldFqn, newFqn);
+
+          return newFqn;
+        }
+
+        if (tries++ > size) {
+          size++;
+          tries = 0;
         }
       }
 
-      if (tries++ > size) {
-        size++;
-        tries = 0;
-      }
     }
+
+    throw new IllegalStateException("Cannot generate unique package name part: too long for JVM.");
   }
 
   /**
@@ -348,15 +354,15 @@ public class ClassRenamer extends SceneTransformer implements IJbcoTransform {
    *
    * @param fullyQualifiedClassName
    *          the fully qualified class name. Can be {@code null}
-   * @return package name or empty string when class name is {@code null} or no '.' in name
+   * @return package name or {@code null} when class name is {@code null}, no '.' in the name, or package name is '.'
    */
   public static String getPackageName(String fullyQualifiedClassName) {
     if (fullyQualifiedClassName == null || fullyQualifiedClassName.isEmpty()) {
-      return "";
+      return null;
     }
 
     int idx = fullyQualifiedClassName.lastIndexOf('.');
-    return idx >= 0 ? fullyQualifiedClassName.substring(0, idx + 1) : "";
+    return idx >= 1 ? fullyQualifiedClassName.substring(0, idx) : null;
   }
 
   private static SootClass getMainClassSafely() {
@@ -367,25 +373,28 @@ public class ClassRenamer extends SceneTransformer implements IJbcoTransform {
     }
   }
 
-  private String getNewPackageName(String packageName) {
+  private String getOrAddNewPackageName(String packageName) {
     if (packageName == null || packageName.isEmpty()) {
-      return getNewPackageNamePart(null);
+      return getNewPackageNamePart("");
     }
 
     final String[] packageNameParts = packageName.split("\\.");
 
-    StringBuilder newPackageName = new StringBuilder((int) (5 * (packageNameParts.length + 1) * 1.5));
+    final StringBuilder newPackageName = new StringBuilder((int) (5 * (packageNameParts.length + 1) * 1.5));
 
-    for (String packageNamePart : packageNameParts) {
-      newPackageName.append(getNewPackageNamePart(packageNamePart)).append('.');
+    for (int i = 0; i < packageNameParts.length; i++) {
+      newPackageName.append(getNewPackageNamePart(packageNameParts[i]));
+
+      if (i < packageNameParts.length - 1) {
+        newPackageName.append('.');
+      }
     }
 
     return newPackageName.toString();
   }
 
   private String getNewPackageNamePart(String oldPackageNamePart) {
-    if (oldPackageNamePart != null && !oldPackageNamePart.isEmpty()
-        && oldToNewPackageNames.containsKey(oldPackageNamePart)) {
+    if (oldPackageNamePart != null && oldToNewPackageNames.containsKey(oldPackageNamePart)) {
       return oldToNewPackageNames.get(oldPackageNamePart);
     }
 
@@ -394,15 +403,16 @@ public class ClassRenamer extends SceneTransformer implements IJbcoTransform {
 
     String newPackageNamePart = "";
     while (newPackageNamePart.length() < NameGenerator.NAME_MAX_LENGTH) {
-
-      newPackageNamePart = nameGenerator.generateName(size);
-
       synchronized (packageNamesMapLock) {
-        if (!oldToNewPackageNames.containsValue(newPackageNamePart)
-            || !oldToNewPackageNames.containsKey(newPackageNamePart)) {
+        if (oldToNewPackageNames.containsValue(newPackageNamePart)) {
+          return oldToNewPackageNames.get(newPackageNamePart);
+        }
 
-          final String key
-              = oldPackageNamePart == null || oldPackageNamePart.isEmpty() ? newPackageNamePart : oldPackageNamePart;
+        newPackageNamePart = nameGenerator.generateName(size);
+
+        if (!oldToNewPackageNames.containsValue(newPackageNamePart)) {
+
+          final String key = oldPackageNamePart == null ? newPackageNamePart : oldPackageNamePart;
 
           oldToNewPackageNames.put(key, newPackageNamePart);
 

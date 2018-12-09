@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -657,14 +658,15 @@ public class PackManager {
 
     while (classes.hasNext()) {
       final SootClass c = classes.next();
-      executor.execute(new Runnable() {
-
-        @Override
-        public void run() {
-          runBodyPacks(c);
-        }
-
-      });
+//      executor.execute(new Runnable() {
+//
+//        @Override
+//        public void run() {
+//          runBodyPacks(c);
+//        }
+//
+//      });
+      runBodyPacks(c);
     }
 
     // Wait till all packs have been executed
@@ -703,14 +705,7 @@ public class PackManager {
 
     while (classes.hasNext()) {
       final SootClass c = classes.next();
-      executor.execute(new Runnable() {
-
-        @Override
-        public void run() {
-          writeClass(c);
-        }
-
-      });
+      executor.execute(() -> writeClass(c));
     }
 
     // Wait till all classes have been written
@@ -1185,6 +1180,16 @@ public class PackManager {
         break;
       default:
         throw new RuntimeException();
+    }
+
+    if (c.getName().contains("AbstractCodeBlockController") || c.getName().contains("DynamicPageFactory")) {
+      try (StringWriter stringWriter = new StringWriter();
+          PrintWriter pw = new PrintWriter(new EscapedWriter(stringWriter))) {
+        Printer.v().printTo(c, pw);
+        logger.info(stringWriter.getBuffer().toString());
+      } catch (IOException e) {
+        e.printStackTrace();
+      }
     }
 
     try {

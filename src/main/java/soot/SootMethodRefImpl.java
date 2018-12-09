@@ -26,6 +26,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Queue;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,35 +47,9 @@ import soot.util.NumberedString;
  * actually exist; the actual target of the reference is determined according to the resolution procedure in the Java Virtual
  * Machine Specification, 2nd ed, section 5.4.3.3.
  */
-
 public class SootMethodRefImpl implements SootMethodRef {
+
   private static final Logger logger = LoggerFactory.getLogger(SootMethodRefImpl.class);
-
-  public SootMethodRefImpl(SootClass declaringClass, String name, List<Type> parameterTypes, Type returnType,
-      boolean isStatic) {
-    this.declaringClass = declaringClass;
-    this.name = name;
-
-    if (parameterTypes == null) {
-      this.parameterTypes = null;
-    } else {
-      List<Type> l = new ArrayList<Type>();
-      l.addAll(parameterTypes);
-      this.parameterTypes = Collections.unmodifiableList(l);
-    }
-
-    this.returnType = returnType;
-    this.isStatic = isStatic;
-    if (declaringClass == null) {
-      throw new RuntimeException("Attempt to create SootMethodRef with null class");
-    }
-    if (name == null) {
-      throw new RuntimeException("Attempt to create SootMethodRef with null name");
-    }
-    if (returnType == null) {
-      throw new RuntimeException("Attempt to create SootMethodRef with null returnType");
-    }
-  }
 
   private final SootClass declaringClass;
   private final String name;
@@ -82,11 +57,33 @@ public class SootMethodRefImpl implements SootMethodRef {
   private final Type returnType;
   private final boolean isStatic;
 
+  public SootMethodRefImpl(SootClass declaringClass, String name, List<Type> parameterTypes, Type returnType,
+      boolean isStatic) {
+    if (declaringClass == null) {
+      throw new IllegalArgumentException("Attempt to create SootMethodRef with null class");
+    }
+    if (name == null) {
+      throw new IllegalArgumentException("Attempt to create SootMethodRef with null name");
+    }
+    if (returnType == null) {
+      throw new IllegalArgumentException("Attempt to create SootMethodRef with null returnType");
+    }
+
+    this.declaringClass = declaringClass;
+    this.name = name;
+    this.parameterTypes = (parameterTypes == null) // initialize with unmodifiable collection
+        ? Collections.emptyList()
+        : Collections.unmodifiableList(new ArrayList<>(parameterTypes));
+    this.returnType = returnType;
+    this.isStatic = isStatic;
+  }
+
   @Override
   public SootClass declaringClass() {
     return getDeclaringClass();
   }
 
+  @Override
   public SootClass getDeclaringClass() {
     return declaringClass;
   }
@@ -106,8 +103,9 @@ public class SootMethodRefImpl implements SootMethodRef {
     return getParameterTypes();
   }
 
+  @Override
   public List<Type> getParameterTypes() {
-    return parameterTypes == null ? Collections.<Type>emptyList() : parameterTypes;
+    return parameterTypes;
   }
 
   @Override
@@ -158,8 +156,7 @@ public class SootMethodRefImpl implements SootMethodRef {
 
     @Override
     public String toString() {
-      StringBuffer ret = new StringBuffer();
-      ret.append(super.toString());
+      final StringBuilder ret = new StringBuilder(super.toString());
       resolve(ret);
       return ret.toString();
     }
@@ -175,64 +172,78 @@ public class SootMethodRefImpl implements SootMethodRef {
     return tryResolve(null);
   }
 
-  private SootMethod checkStatic(SootMethod ret) {
+  private void checkStatic(SootMethod method) {
     if ((Options.v().wrong_staticness() == Options.wrong_staticness_fail
-        || Options.v().wrong_staticness() == Options.wrong_staticness_fixstrict) && ret.isStatic() != isStatic()
-        && !ret.isPhantom()) {
-      throw new ResolutionFailedException("Resolved " + this + " to " + ret + " which has wrong static-ness");
+        || Options.v().wrong_staticness() == Options.wrong_staticness_fixstrict) && method.isStatic() != isStatic()
+        && !method.isPhantom()) {
+      throw new ResolutionFailedException("Resolved " + this + " to " + method + " which has wrong static-ness");
     }
-    return ret;
   }
 
-  private SootMethod tryResolve(StringBuffer trace) {
-    SootClass cl = declaringClass;
-    while (cl != null) {
+  private SootMethod tryResolve(final StringBuilder trace) {
+    SootClass selectedClass = declaringClass;
+    while (selectedClass != null) {
       if (trace != null) {
-        trace.append("Looking in " + cl + " which has methods " + cl.getMethods() + "\n");
+        trace.append("Looking in ").append(selectedClass).append(" which has methods ").append(selectedClass.getMethods())
+            .append("\n");
       }
-      SootMethod sm = cl.getMethodUnsafe(getSubSignature());
-      if (sm != null) {
-        return checkStatic(sm);
+
+      // using soot.SootClass.getMethodUnsafe(java.lang.String, java.util.List<soot.Type>, soot.Type)
+      // instead of soot.SootClass.getMethodUnsafe(soot.util.NumberedString)
+      // to avoid false positive on method/class renaming
+      final SootMethod method = selectedClass.getMethodUnsafe(name, parameterTypes, returnType);
+      if (method != null) {
+        checkStatic(method);
+        return method;
       }
-      if (Scene.v().allowsPhantomRefs() && cl.isPhantom()) {
-        SootMethod m = Scene.v().makeSootMethod(name, parameterTypes, returnType, isStatic() ? Modifier.STATIC : 0);
-        m.setPhantom(true);
-        m = cl.getOrAddMethod(m);
-        return checkStatic(m);
+
+      if (Scene.v().allowsPhantomRefs() && selectedClass.isPhantom()) {
+        SootMethod phantomMethod
+            = Scene.v().makeSootMethod(name, parameterTypes, returnType, isStatic() ? Modifier.STATIC : 0);
+        phantomMethod.setPhantom(true);
+        phantomMethod = selectedClass.getOrAddMethod(phantomMethod);
+        checkStatic(phantomMethod);
+        return phantomMethod;
       }
-      cl = cl.getSuperclassUnsafe();
+      selectedClass = selectedClass.getSuperclassUnsafe();
     }
 
-    cl = declaringClass;
-    while (cl != null) {
-      ArrayDeque<SootClass> queue = new ArrayDeque<SootClass>();
-      queue.addAll(cl.getInterfaces());
+    selectedClass = declaringClass;
+    while (selectedClass != null) {
+      final Queue<SootClass> queue = new ArrayDeque<>(selectedClass.getInterfaces());
       while (!queue.isEmpty()) {
-        SootClass iface = queue.poll();
+        final SootClass iface = queue.poll();
         if (trace != null) {
-          trace.append("Looking in " + iface + " which has methods " + iface.getMethods() + "\n");
+          trace.append("Looking in ").append(iface).append(" which has methods ").append(iface.getMethods()).append("\n");
         }
-        SootMethod sm = iface.getMethodUnsafe(getSubSignature());
-        if (sm != null) {
-          return checkStatic(sm);
+
+        // using soot.SootClass.getMethodUnsafe(java.lang.String, java.util.List<soot.Type>, soot.Type)
+        // instead of soot.SootClass.getMethodUnsafe(soot.util.NumberedString)
+        // to avoid false positive on method/class renaming
+        final SootMethod method = iface.getMethodUnsafe(name, parameterTypes, returnType);
+        if (method != null) {
+          checkStatic(method);
+          return method;
         }
+
         queue.addAll(iface.getInterfaces());
       }
-      cl = cl.getSuperclassUnsafe();
+      selectedClass = selectedClass.getSuperclassUnsafe();
     }
 
     // If we don't have a method yet, we try to fix it on the fly
-    if (cl == null && Scene.v().allowsPhantomRefs() && Options.v().ignore_resolution_errors()) {
-      SootMethod m = Scene.v().makeSootMethod(name, parameterTypes, returnType, isStatic() ? Modifier.STATIC : 0);
-      m.setPhantom(true);
-      m = declaringClass.getOrAddMethod(m);
-      return checkStatic(m);
+    if (Scene.v().allowsPhantomRefs() && Options.v().ignore_resolution_errors()) {
+      SootMethod method = Scene.v().makeSootMethod(name, parameterTypes, returnType, isStatic() ? Modifier.STATIC : 0);
+      method.setPhantom(true);
+      method = declaringClass.getOrAddMethod(method);
+      checkStatic(method);
+      return method;
     }
 
     return null;
   }
 
-  private SootMethod resolve(StringBuffer trace) {
+  private SootMethod resolve(final StringBuilder trace) {
     SootMethod resolved = tryResolve(trace);
     if (resolved != null) {
       return resolved;
